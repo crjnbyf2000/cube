@@ -1,0 +1,256 @@
+CREATE TABLE tmp.for_basic_metrics
+(
+    disp_id Int64,
+    mpioip String,
+    group_cd Int32,
+    ds_cd String,
+    in_dt Date,
+    out_dt Nullable(Date),
+    birth_dt Date,
+    death_dt Nullable(Date),
+    pol_cd Int64,
+    ok_region_cd String,
+    smo_region_cd String,
+    smo_cd String,
+    attach_mo_cd String,
+    task_id UUID,
+    plan_id UUID,
+    profile_cd Int32,
+    task_status_cd Int32,
+    event_type_cd Int32,
+    task_start Date,
+    task_end Date,
+    closed_dt Nullable(Date),
+    insert_dttm DateTime64(3),
+    update_dttm DateTime64(3)
+)
+ENGINE = MergeTree
+ORDER BY (mpioip, disp_id);
+INSERT INTO tmp.for_basic_metrics
+SELECT
+    di.id AS disp_id,
+    di.mpioip,
+    di.group_cd,
+    di.ds_cd,
+    di.in_dt,
+    di.out_dt,
+    p.birth_dt,
+    p.death_dt,
+    p.pol_cd,
+    p.ok_region_cd,
+    p.smo_region_cd,
+    p.smo_cd,
+    p.attach_mo_cd,
+    t.task_id,
+    dp.plan_id,
+    dp.profile_cd,
+    t.task_status_cd,
+    t.event_type_cd,
+    t.task_start,
+    t.task_end,
+    t.closed_dt,
+    t.insert_dttm,
+    t.update_dttm
+FROM stage.disp_info di
+LEFT JOIN stage.dispensary_plan dp
+    ON dp.episod_id = di.episod_id
+LEFT JOIN stage.event_task t
+    ON t.plan_id = dp.plan_id
+LEFT JOIN stage.dispans_person p
+    ON p.mpioip = di.mpioip;
+
+TRUNCATE TABLE tmp.dim_basic_filters;
+
+DROP TABLE IF EXISTS tmp.dim_basic_filters;
+
+TRUNCATE TABLE tmp.dim_basic_filters;
+DROP TABLE IF EXISTS tmp.dim_basic_filters;
+CREATE TABLE IF NOT EXISTS tmp.dim_basic_filters
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_smo String,
+    f_mo String
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo
+)
+SETTINGS index_granularity = 8192;
+
+TRUNCATE TABLE tmp.dim_basic_filters;
+
+INSERT INTO tmp.dim_basic_filters
+SELECT DISTINCT
+    region_smo_tuple.1 AS f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    region_smo_tuple.2 AS f_smo,
+    f_mo
+FROM
+(
+    SELECT
+        arrayJoin([
+            tuple('0', '0'),
+            tuple(
+                if(ifNull(smo_cd, '') = '', '0', substring(smo_cd, 1, 2)),
+                if(ifNull(smo_cd, '') = '', '0', smo_cd)
+            ),
+            tuple(
+                if(ifNull(smo_cd, '') = '', '0', substring(smo_cd, 1, 2)),
+                '0'
+            )
+        ]) AS region_smo_tuple,
+        arrayJoin([
+            '0',
+            toString(ifNull(profile_cd, 0))
+        ]) AS f_profile_cd,
+        arrayJoin([
+            '0',
+            toString(ifNull(group_cd, 0))
+        ]) AS f_dn_group_cd,
+        arrayJoin([
+            '0',
+            if(ifNull(attach_mo_cd, '') = '', '0', attach_mo_cd)
+        ]) AS f_mo
+    FROM tmp.for_basic_metrics
+);
+
+CREATE TABLE cube.basic_metrics
+(
+    `f_region_smo_cd` String,
+    `f_profile_cd` String,
+    `f_dn_group_cd` String,
+    `f_y` Int32,
+    `f_q` Int32,
+    `f_smo` String,
+    `f_mo` String,
+    `sl_dn_cnt` UInt64,
+    `zl_on_dn_total` UInt64,
+    `death_new` UInt64,
+    `death_new_percent` UInt64,
+    `all_tasks` UInt64,
+    `main_execution` UInt64,
+    `main_execution_percent` UInt64
+)
+ENGINE = MergeTree
+ORDER BY (f_region_smo_cd,
+ f_profile_cd,
+ f_dn_group_cd,
+ f_y,
+ f_q,
+ f_smo,
+ f_mo)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO cube.basic_metrics
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    sl_dn_cnt,
+    zl_on_dn_total,
+    death_new,
+    death_new_percent,
+    all_tasks,
+    main_execution,
+    main_execution_percent
+)
+WITH
+    2026 AS v_year, -- вводим комбинации по каждому году и каждому кварталу,начиная с 2019 года заканчивая 2026 
+    4 AS v_quarter
+SELECT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    v_year AS f_y,
+    v_quarter AS f_q,
+    f_smo,
+    f_mo,
+    sl_dn_cnt,
+    zl_on_dn_total,
+    death_new,
+    toUInt64(if(sl_dn_cnt = 0, 0, round(death_new * 100.0 / sl_dn_cnt))) AS death_new_percent,
+    all_tasks,
+    main_execution,
+    toUInt64(if(all_tasks = 0, 0, round(main_execution * 100.0 / all_tasks))) AS main_execution_percent
+FROM
+(
+    SELECT
+        f_region_smo_cd,
+        if(bitTest(mask, 0), '0', profile_cd_str) AS f_profile_cd,
+        if(bitTest(mask, 1), '0', group_cd_str) AS f_dn_group_cd,
+        f_smo,
+        if(bitTest(mask, 2), '0', attach_mo_cd_str) AS f_mo,
+        uniqExact(disp_id) AS sl_dn_cnt,
+        uniqExactIf(mpioip, out_dt IS NULL) AS zl_on_dn_total,
+        uniqExactIf(mpioip, death_dt IS NOT NULL) AS death_new,
+        uniqExactIf(task_id, task_id IS NOT NULL AND task_status_cd != 5) AS all_tasks,
+        uniqExactIf(task_id, task_id IS NOT NULL AND task_status_cd IN (1,2)) AS main_execution
+    FROM
+    (
+        SELECT
+            region_smo_tuple.1 AS f_region_smo_cd,
+            region_smo_tuple.2 AS f_smo,
+            profile_cd_str,
+            group_cd_str,
+            attach_mo_cd_str,
+            disp_id,
+            mpioip,
+            out_dt,
+            death_dt,
+            task_id,
+            task_status_cd
+        FROM
+        (
+            SELECT
+                disp_id,
+                mpioip,
+                out_dt,
+                death_dt,
+                task_id,
+                task_status_cd,
+                if(ifNull(smo_cd, '') = '', '0', substring(smo_cd, 1, 2)) AS region_smo_cd,
+                toString(ifNull(profile_cd, 0)) AS profile_cd_str,
+                toString(ifNull(group_cd, 0)) AS group_cd_str,
+                if(ifNull(smo_cd, '') = '', '0', smo_cd) AS smo_cd_str,
+                if(ifNull(attach_mo_cd, '') = '', '0', attach_mo_cd) AS attach_mo_cd_str
+            FROM tmp.for_basic_metrics
+            WHERE in_dt < (
+                SELECT dt_to
+                FROM tmp.calc_periods
+                WHERE f_y = v_year
+                  AND f_q = v_quarter
+            )
+              AND ifNull(out_dt, toDate('2100-01-01')) >= (
+                SELECT dt_from
+                FROM tmp.calc_periods
+                WHERE f_y = v_year
+                  AND f_q = v_quarter
+            )
+        )
+        ARRAY JOIN
+        [
+            tuple('0', '0'),
+            tuple(region_smo_cd, '0'),
+            tuple(region_smo_cd, smo_cd_str)
+        ] AS region_smo_tuple
+    )
+    ARRAY JOIN range(8) AS mask
+    GROUP BY
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo
+);
