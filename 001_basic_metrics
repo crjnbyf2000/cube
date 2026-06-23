@@ -6,30 +6,31 @@ CREATE TABLE tmp.for_basic_metrics
     ds_cd String,
     in_dt Date,
     out_dt Nullable(Date),
-    birth_dt Date,
+    birth_dt Nullable(Date),
     death_dt Nullable(Date),
-    pol_cd Int64,
-    ok_region_cd String,
-    smo_region_cd String,
-    smo_cd String,
-    attach_mo_cd String,
-    task_id UUID,
-    plan_id UUID,
-    profile_cd Int32,
-    task_status_cd Int32,
-    event_type_cd Int32,
-    task_start Date,
-    task_end Date,
+    pol_cd Nullable(Int64),
+    ok_region_cd Nullable(String),
+    smo_region_cd Nullable(String),
+    smo_cd Nullable(String),
+    attach_mo_cd Nullable(String),
+    task_id Nullable(UUID),
+    plan_id Nullable(UUID),
+    profile_cd Nullable(Int32),
+    task_status_cd Nullable(Int32),
+    event_type_cd Nullable(Int32),
+    task_start Nullable(Date),
+    task_end Nullable(Date),
     closed_dt Nullable(Date),
-    insert_dttm DateTime64(3),
-    update_dttm DateTime64(3)
+    insert_dttm Nullable(DateTime64(3)),
+    update_dttm Nullable(DateTime64(3))
 )
 ENGINE = MergeTree
-ORDER BY (mpioip, disp_id);
-
+ORDER BY (mpioip, disp_id)
+SETTINGS index_granularity = 8192;
+DESCRIBE TABLE tmp.for_basic_metrics;
 INSERT INTO tmp.for_basic_metrics
 SELECT
-    di.id AS disp_id,
+    di.disp_id AS disp_id,
     di.mpioip,
     di.group_cd,
     di.ds_cd,
@@ -58,7 +59,8 @@ LEFT JOIN stage.dispensary_plan dp
 LEFT JOIN stage.event_task t
     ON t.plan_id = dp.plan_id
 LEFT JOIN stage.dispans_person p
-    ON p.mpioip = di.mpioip;
+    ON p.mpioip = di.mpioip
+SETTINGS join_use_nulls = 1;
 
 DROP TABLE IF EXISTS tmp.calc_periods;
 
