@@ -12,3 +12,31 @@ ORDER BY (mpioip,
  risk_id,
  risk_level_id)
 SETTINGS index_granularity = 8192;
+
+
+
+INSERT INTO stage.risk
+(
+    mpioip,
+    risk_id,
+    risk_level_id,
+    past_risk_level_id,
+    risk_level_diff_id,
+    risk_dt
+)
+SELECT
+    mpi_oip AS mpioip,
+    toInt8OrZero(arrayElement(splitByChar('/', risk_reference), 2)) AS risk_id,
+    toInt8OrZero(arrayElement(splitByChar('/', risk_level_reference), 2)) AS risk_level_id,
+    toInt8OrNull(arrayElement(splitByChar('/', before_risk_level_ref), 2)) AS past_risk_level_id,
+    if(
+        before_risk_level_ref IS NULL,
+        NULL,
+        toInt8OrZero(arrayElement(splitByChar('/', risk_level_reference), 2))
+        - toInt8OrNull(arrayElement(splitByChar('/', before_risk_level_ref), 2))
+    ) AS risk_level_diff_id,
+    ifNull(occurrence_date, toDate(event_at)) AS risk_dt
+FROM raw.event_risk
+WHERE mpi_oip != ''
+  AND risk_reference != ''
+  AND risk_level_reference != '';
