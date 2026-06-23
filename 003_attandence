@@ -1,0 +1,145 @@
+CREATE TABLE tmp.for_attendance
+(
+    `mpioip` String,
+    `in_dt` Date,
+    `out_dt` Nullable(Date),
+    `death_dt` Nullable(Date),
+    `birth_dt` Date,
+    `task_id` UUID,
+    `task_status_cd` Int32,
+    `task_end` Date,
+    `closed_dt` Nullable(Date),
+    `f_region_smo_cd` String,
+    `f_profile_cd` String,
+    `f_dn_group_cd` String,
+    `f_y` Int32,
+    `f_q` Int32,
+    `f_smo` String,
+    `f_mo` String
+)
+ENGINE = MergeTree
+ORDER BY mpioip
+SETTINGS index_granularity = 8192;
+INSERT INTO tmp.for_attendance
+SELECT
+    mpioip,
+    in_dt,
+    out_dt,
+    death_dt,          
+    birth_dt,
+    task_id,
+    task_status_cd,
+    task_end,
+    closed_dt,
+    if(ifNull(smo_cd, '') = '', '0', substring(smo_cd, 1, 2)) AS f_region_smo_cd,
+    if(ifNull(profile_cd, 0) = 0, '0', toString(profile_cd)) AS f_profile_cd,
+    if(ifNull(group_cd, 0) = 0, '0', toString(group_cd)) AS f_dn_group_cd,
+    toYear(in_dt) AS f_y,
+    0 AS f_q,
+    if(ifNull(smo_cd, '') = '', '0', smo_cd) AS f_smo,
+    if(ifNull(attach_mo_cd, '') = '', '0', attach_mo_cd) AS f_mo
+FROM tmp.for_basic_metrics;
+CREATE TABLE tmp.dim_attendance_filters
+(
+    `f_region_smo_cd` String,
+    `f_profile_cd` String,
+    `f_dn_group_cd` String,
+    `f_y` Int32,
+    `f_q` Int32,
+    `f_smo` String,
+    `f_mo` String
+)
+ENGINE = MergeTree
+ORDER BY (f_region_smo_cd,
+ f_profile_cd,
+ f_dn_group_cd,
+ f_y,
+ f_q,
+ f_smo,
+ f_mo)
+SETTINGS index_granularity = 8192;
+INSERT INTO tmp.dim_attendance_filters
+SELECT DISTINCT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo
+FROM tmp.for_attendance;
+CREATE TABLE cube.attendance
+(
+    `f_region_smo_cd` String,
+    `f_profile_cd` String,
+    `f_dn_group_cd` String,
+    `f_y` Int32,
+    `f_q` Int32,
+    `f_smo` String,
+    `f_mo` String,
+    `total` UInt64,
+    `not_observed` UInt64,
+    `not_observed_percent` Decimal(5, 2),
+    `observed_over_2_y` UInt64,
+    `observed_over_2_y_percent` Decimal(5, 2),
+    `observed_over_1_y` UInt64,
+    `observed_over_1_y_percent` Decimal(5, 2),
+    `timely_visits` UInt64,
+    `timely_visits_percent` Decimal(5, 2)
+)
+ENGINE = Log;
+INSERT INTO cube.attendance
+SELECT
+    f.f_region_smo_cd,
+    f.f_profile_cd,
+    f.f_dn_group_cd,
+    f.f_y,
+    f.f_q,
+    f.f_smo,
+    f.f_mo,
+    sum(x.total_flag) AS total,
+    sum(x.not_observed_flag) AS not_observed,
+    round(100.0 * sum(x.not_observed_flag) / nullIf(sum(x.total_flag), 0), 2) AS not_observed_percent,
+    sum(x.observed_over_2_y_flag) AS observed_over_2_y,
+    round(100.0 * sum(x.observed_over_2_y_flag) / nullIf(sum(x.total_flag), 0), 2) AS observed_over_2_y_percent,
+    sum(x.observed_over_1_y_flag) AS observed_over_1_y,
+    round(100.0 * sum(x.observed_over_1_y_flag) / nullIf(sum(x.total_flag), 0), 2) AS observed_over_1_y_percent,
+    sum(x.timely_visits_flag) AS timely_visits,
+    round(100.0 * sum(x.timely_visits_flag) / nullIf(sum(x.total_flag), 0), 2) AS timely_visits_percent
+FROM tmp.dim_attendance_filters f
+INNER JOIN
+(
+    SELECT
+        if(bitTest(mask, 0), '0', f_region_smo_cd) AS f_region_smo_cd,
+        if(bitTest(mask, 1), '0', f_profile_cd) AS f_profile_cd,
+        if(bitTest(mask, 2), '0', f_dn_group_cd) AS f_dn_group_cd,
+        f_y,
+        f_q,
+        if(bitTest(mask, 3), '0', f_smo) AS f_smo,
+        if(bitTest(mask, 4), '0', f_mo) AS f_mo,
+        mpioip,
+        1 AS total_flag,
+        CASE WHEN task_status_cd NOT IN (1,2) OR task_status_cd IS NULL THEN 1 ELSE 0 END AS not_observed_flag,
+        CASE WHEN greatest(task_end, closed_dt) < addYears(toDate(concat(toString(f_y), '-01-01')), -2) THEN 1 ELSE 0 END AS observed_over_2_y_flag,
+        CASE WHEN greatest(task_end, closed_dt) >= addYears(toDate(concat(toString(f_y), '-01-01')), -2)
+              AND greatest(task_end, closed_dt) < addYears(toDate(concat(toString(f_y), '-01-01')), -1) THEN 1 ELSE 0 END AS observed_over_1_y_flag,
+        CASE WHEN greatest(task_end, closed_dt) >= addYears(toDate(concat(toString(f_y), '-01-01')), -1) THEN 1 ELSE 0 END AS timely_visits_flag
+    FROM tmp.for_attendance
+    ARRAY JOIN range(32) AS mask
+) x
+ON  x.f_region_smo_cd = f.f_region_smo_cd
+AND x.f_profile_cd = f.f_profile_cd
+AND x.f_dn_group_cd = f.f_dn_group_cd
+AND x.f_y = f.f_y
+AND x.f_q = f.f_q
+AND x.f_smo = f.f_smo
+AND x.f_mo = f.f_mo
+GROUP BY
+    f.f_region_smo_cd,
+    f.f_profile_cd,
+    f.f_dn_group_cd,
+    f.f_y,
+    f.f_q,
+    f.f_smo,
+    f.f_mo
+HAVING total > 0;
