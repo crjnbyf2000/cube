@@ -5,7 +5,7 @@ CREATE TABLE tmp.for_attendance
     `out_dt` Nullable(Date),
     `death_dt` Nullable(Date),
     `birth_dt` Date,
-    `task_id` UUID,
+    `task_id` Nullable(UUID),
     `task_status_cd` Int32,
     `task_end` Date,
     `closed_dt` Nullable(Date),
@@ -20,6 +20,8 @@ CREATE TABLE tmp.for_attendance
 ENGINE = MergeTree
 ORDER BY mpioip
 SETTINGS index_granularity = 8192;
+
+
 INSERT INTO tmp.for_attendance
 SELECT
     mpioip,
