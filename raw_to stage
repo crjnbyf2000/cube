@@ -1,0 +1,16 @@
+CREATE TABLE stage.disp_info
+(
+ id String,
+ episod_id String,
+    group_cd Int32,
+    ds_cd Int32,
+    mo_cd Int32,
+    in_dt Date,
+    out_dt Nullable(Date),
+    mpioip String
+)
+ENGINE = MergeTree
+ORDER BY (id, mpioip)
+SETTINGS index_granularity = 8192;
+
+
