@@ -1,0 +1,181 @@
+CREATE TABLE tmp.lk_inform_source
+(
+    mpioip String,
+    last_login_at Nullable(Date),
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_smo String,
+    f_mo String
+)
+ENGINE = MergeTree
+ORDER BY (mpioip, f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+CREATE TABLE tmp.lk_cube_agg
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    using_lk UInt64,
+    using_lk_last_m UInt64,
+    using_lk_last_y UInt64
+)
+ENGINE = MergeTree
+ORDER BY (f_y, f_q, f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+CREATE TABLE cube.lk_inform
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    total UInt64,
+    using_lk UInt64,
+    using_lk_percent Decimal(5, 2),
+    using_lk_last_m UInt64,
+    using_lk_last_m_percent Decimal(5, 2),
+    using_lk_last_y UInt64,
+    using_lk_last_y_percent Decimal(5, 2),
+    insert_dttm DateTime64(3, 'Europe/Moscow'),
+    update_dttm DateTime64(3, 'Europe/Moscow')
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo
+)
+SETTINGS index_granularity = 8192;
+INSERT INTO tmp.lk_inform_source
+(
+    mpioip,
+    last_login_at,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo
+)
+SELECT DISTINCT
+    lk.mpioip,
+    lk.last_login_at,
+    if(ifNull(f.smo_cd, '') = '', '0', substring(f.smo_cd, 1, 2)) AS f_region_smo_cd,
+    toString(ifNull(f.profile_cd, 0)) AS f_profile_cd,
+    toString(ifNull(f.group_cd, 0)) AS f_dn_group_cd,
+    if(ifNull(f.smo_cd, '') = '', '0', f.smo_cd) AS f_smo,
+    if(ifNull(f.attach_mo_cd, '') = '', '0', f.attach_mo_cd) AS f_mo
+FROM stage.lk_inform lk
+INNER JOIN tmp.for_basic_metrics f
+    ON f.mpioip = lk.mpioip
+WHERE lk.mpioip != ''
+  AND lk.last_login_at IS NOT NULL
+  AND f.profile_cd IS NOT NULL
+  AND f.profile_cd != -1;
+INSERT INTO tmp.lk_cube_agg
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    using_lk,
+    using_lk_last_m,
+    using_lk_last_y
+)
+WITH
+    2026 AS v_year,  --- надо продумать в сервисе заполнение переменных 
+    4 AS v_quarter
+SELECT
+    if(bitTest(mask, 0), '0', f_region_smo_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', f_profile_cd) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', f_dn_group_cd) AS f_dn_group_cd,
+    v_year AS f_y,
+    v_quarter AS f_q,
+    if(bitTest(mask, 3), '0', f_smo) AS f_smo,
+    if(bitTest(mask, 4), '0', f_mo) AS f_mo,
+    uniqExactIf(mpioip, last_login_at <= p.f_d) AS using_lk,
+    uniqExactIf(mpioip, last_login_at BETWEEN addMonths(addDays(p.f_d, 1), -3) AND p.f_d) AS using_lk_last_m,
+    uniqExactIf(mpioip, last_login_at BETWEEN addMonths(addDays(p.f_d, 1), -12) AND p.f_d) AS using_lk_last_y
+FROM tmp.lk_inform_source
+CROSS JOIN
+(
+    SELECT addDays(dt_to, -1) AS f_d
+    FROM tmp.calc_periods
+    WHERE f_y = v_year
+      AND f_q = v_quarter
+) p
+ARRAY JOIN range(32) AS mask
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo
+HAVING using_lk + using_lk_last_m + using_lk_last_y <> 0;
+INSERT INTO cube.lk_inform
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    total,
+    using_lk,
+    using_lk_percent,
+    using_lk_last_m,
+    using_lk_last_m_percent,
+    using_lk_last_y,
+    using_lk_last_y_percent,
+    insert_dttm,
+    update_dttm
+)
+WITH
+    2022 AS v_year, --- продумать многократный запуск с переменными, значения взять из tmp/period_calc
+    0 AS v_quarter
+SELECT
+    att.f_region_smo_cd,
+    att.f_profile_cd,
+    att.f_dn_group_cd,
+    att.f_y,
+    att.f_q,
+    att.f_smo,
+    att.f_mo,
+    att.total,
+    ifNull(lk.using_lk, 0) AS using_lk,
+    toDecimal64(if(att.total > 0, round(ifNull(lk.using_lk, 0) * 100.0 / att.total, 2), 0), 2) AS using_lk_percent,
+    ifNull(lk.using_lk_last_m, 0) AS using_lk_last_m,
+    toDecimal64(if(att.total > 0, round(ifNull(lk.using_lk_last_m, 0) * 100.0 / att.total, 2), 0), 2) AS using_lk_last_m_percent,
+    ifNull(lk.using_lk_last_y, 0) AS using_lk_last_y,
+    toDecimal64(if(att.total > 0, round(ifNull(lk.using_lk_last_y, 0) * 100.0 / att.total, 2), 0), 2) AS using_lk_last_y_percent,
+    now64(3, 'Europe/Moscow') AS insert_dttm,
+    now64(3, 'Europe/Moscow') AS update_dttm
+FROM cube.attendance att
+LEFT JOIN tmp.lk_cube_agg lk
+    ON att.f_region_smo_cd = lk.f_region_smo_cd
+   AND att.f_profile_cd = lk.f_profile_cd
+   AND att.f_dn_group_cd = lk.f_dn_group_cd
+   AND att.f_y = lk.f_y
+   AND att.f_q = lk.f_q
+   AND att.f_smo = lk.f_smo
+   AND att.f_mo = lk.f_mo
+WHERE att.f_y = v_year
+  AND att.f_q = v_quarter
+  AND att.total > 0;
