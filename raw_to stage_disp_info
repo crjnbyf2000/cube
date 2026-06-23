@@ -1,7 +1,9 @@
 drop table stage.disp_info
+
+
 CREATE TABLE stage.disp_info
 (
- id String,
+ disp_id String,
  episod_id String,
     group_cd Int32,
     ds_cd String,
@@ -11,11 +13,12 @@ CREATE TABLE stage.disp_info
     mpioip String
 )
 ENGINE = MergeTree
-ORDER BY (id, mpioip)
+ORDER BY (disp_id, mpioip)
 SETTINGS index_granularity = 8192;
+truncate table stage.disp_info
 INSERT INTO stage.disp_info
 (
-    id,
+    disp_id,
     episod_id,
     group_cd,
     ds_cd,
@@ -25,7 +28,7 @@ INSERT INTO stage.disp_info
     mpioip
 )
 SELECT
-    id,
+    disp_id,
     episod_id,
     group_cd,
     ds_cd,
@@ -36,7 +39,7 @@ SELECT
 FROM
 (
     SELECT
-        cmp_id AS id,
+        cmp_id AS disp_id,
         id as episod_id,
         toInt32(splitByChar('/', diagnosis_group_reference)[2]) AS group_cd,
         arrayElement(splitByChar('/', diagnosis_reference), 2) AS ds_cd,
