@@ -1,0 +1,163 @@
+CREATE TABLE IF NOT EXISTS tmp.statusevent_task_agg
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    task_status_cd Int32,
+    task_cnt UInt64
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    task_status_cd
+);
+INSERT INTO tmp.statusevent_task_agg
+SELECT
+    if(bitTest(mask, 0), '0', real_region_smo_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', real_profile_cd) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', real_dn_group_cd) AS f_dn_group_cd,
+    f_y,
+    f_q,
+    if(bitTest(mask, 3), '0', real_smo) AS f_smo,
+    if(bitTest(mask, 4), '0', real_mo) AS f_mo,
+    task_status_cd,
+    uniqExact(task_id) AS task_cnt
+FROM
+(
+    SELECT DISTINCT
+        cp.f_y,
+        cp.f_q,
+        if(ifNull(t.smo_cd, '') = '', '0', substring(t.smo_cd, 1, 2)) AS real_region_smo_cd,
+        toString(ifNull(t.profile_cd, 0)) AS real_profile_cd,
+        toString(ifNull(t.group_cd, 0)) AS real_dn_group_cd,
+        if(ifNull(t.smo_cd, '') = '', '0', t.smo_cd) AS real_smo,
+        if(ifNull(t.attach_mo_cd, '') = '', '0', t.attach_mo_cd) AS real_mo,
+        t.task_id,
+        t.task_status_cd
+    FROM tmp.for_basic_metrics AS t
+    CROSS JOIN tmp.calc_periods AS cp
+    WHERE t.task_id IS NOT NULL
+      AND t.task_status_cd IN (1, 2, 3, 4)
+      AND ifNull(t.closed_dt, toDate(now('Europe/Moscow'))) >= cp.dt_from
+      AND ifNull(t.closed_dt, toDate(now('Europe/Moscow'))) < cp.dt_to
+) AS src
+ARRAY JOIN range(32) AS mask
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    task_status_cd;
+CREATE TABLE IF NOT EXISTS cube.event_statuses
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    done_task_countV UInt64,
+    done_task_percentV Decimal(18, 2),
+    assumpt_task_countV UInt64,
+    assumpt_task_percentV Decimal(18, 2),
+    plan_task_countV UInt64,
+    plan_task_percentV Decimal(18, 2),
+    failed_task_countV UInt64,
+    failed_task_percentV Decimal(18, 2),
+    all_tasks UInt64,
+    insert_dttm DateTime64(3, 'Europe/Moscow'),
+    update_dttm DateTime64(3, 'Europe/Moscow')
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo
+);
+TRUNCATE TABLE cube.event_statuses;
+INSERT INTO cube.event_statuses
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    done_task_countV,
+    done_task_percentV,
+    assumpt_task_countV,
+    assumpt_task_percentV,
+    plan_task_countV,
+    plan_task_percentV,
+    failed_task_countV,
+    failed_task_percentV,
+    all_tasks,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    done_task_countV,
+    toDecimal64(ifNull(round(done_task_countV * 100.0 / nullIf(all_tasks, 0), 2), 0), 2) AS done_task_percentV,
+    assumpt_task_countV,
+    toDecimal64(ifNull(round(assumpt_task_countV * 100.0 / nullIf(all_tasks, 0), 2), 0), 2) AS assumpt_task_percentV,
+    plan_task_countV,
+    toDecimal64(ifNull(round(plan_task_countV * 100.0 / nullIf(all_tasks, 0), 2), 0), 2) AS plan_task_percentV,
+    failed_task_countV,
+    toDecimal64(ifNull(round(failed_task_countV * 100.0 / nullIf(all_tasks, 0), 2), 0), 2) AS failed_task_percentV,
+    all_tasks,
+    now64(3, 'Europe/Moscow') AS insert_dttm,
+    now64(3, 'Europe/Moscow') AS update_dttm
+FROM
+(
+    SELECT
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_y,
+        f_q,
+        f_smo,
+        f_mo,
+        sumIf(task_cnt, task_status_cd = 1) AS done_task_countV,
+        sumIf(task_cnt, task_status_cd = 2) AS assumpt_task_countV,
+        sumIf(task_cnt, task_status_cd = 4) AS plan_task_countV,
+        sumIf(task_cnt, task_status_cd = 3) AS failed_task_countV,
+        sum(task_cnt) AS all_tasks
+    FROM tmp.statusevent_task_agg
+    GROUP BY
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_y,
+        f_q,
+        f_smo,
+        f_mo
+)
+WHERE all_tasks > 0;
