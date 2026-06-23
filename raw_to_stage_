@@ -1,0 +1,57 @@
+drop TABLE stage.dispensary_plan
+
+CREATE TABLE stage.dispensary_plan
+(
+    `mpioip` String,
+    `plan_id` UUID,
+    `status_plane` Int32,
+    `last_status` Int32,
+    `episod_id` String,
+    `profile_cd` Int32,
+    `duration` Int32,
+    `start_date` Date,
+    `end_date` Nullable(Date)
+)
+ENGINE = MergeTree
+ORDER BY (plan_id, mpioip, episod_id)
+SETTINGS index_granularity = 8192;
+INSERT INTO stage.dispensary_plan
+(
+    mpioip,
+    plan_id,
+    status_plane,
+    last_status,
+    episod_id,
+    profile_cd,
+    duration,
+    start_date,
+    end_date
+)
+SELECT
+    mpioip,
+    plan_id,
+    status_plane,
+    last_status,
+    episod_id,
+    profile_cd,
+    duration,
+    start_date,
+    end_date
+FROM
+(
+    SELECT
+        mpi_oip AS mpioip,
+        toUUID(id) AS plan_id,
+        ifNull( toInt32OrNull(extract(execution_state_reference, '[0-9]+$')), 0 ) AS status_plane,
+        ifNull(  toInt32OrNull(extract(before_execution_state_ref, '[0-9]+$')), 0 ) AS last_status,
+        dispensary_episode_id AS episod_id,
+        ifNull(toInt32OrNull(extract(medical_profile_reference, '[0-9]+$')), 0 ) AS profile_cd,
+        ifNull(toInt32OrNull(extract(duration_type_reference, '[0-9]+$')), 0) AS duration,
+        ifNull(period_start, toDate('1970-01-01')) AS start_date,
+        period_end AS end_date,
+        row_number() OVER ( PARTITION BY id ORDER BY version DESC, event_at DESC
+        ) AS rn
+    FROM raw.event_dispensary_plan
+    WHERE toUUIDOrNull(id) IS NOT NULL
+)
+WHERE rn = 1;
