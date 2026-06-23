@@ -26,6 +26,7 @@ CREATE TABLE tmp.for_basic_metrics
 )
 ENGINE = MergeTree
 ORDER BY (mpioip, disp_id);
+
 INSERT INTO tmp.for_basic_metrics
 SELECT
     di.id AS disp_id,
@@ -58,6 +59,34 @@ LEFT JOIN stage.event_task t
     ON t.plan_id = dp.plan_id
 LEFT JOIN stage.dispans_person p
     ON p.mpioip = di.mpioip;
+
+DROP TABLE IF EXISTS tmp.calc_periods;
+
+CREATE TABLE tmp.calc_periods
+(
+    f_y Int32,
+    f_q Int32,
+    dt_from Date,
+    dt_to Date
+)
+ENGINE = MergeTree
+ORDER BY (f_y, f_q);
+
+
+INSERT INTO tmp.calc_periods
+SELECT
+    yy.y AS f_y,
+    qq.q AS f_q,
+    if(qq.q = 0,
+        toDate(concat(toString(yy.y), '-01-01')),
+        toStartOfQuarter(toDate(concat(toString(yy.y), '-', toString((qq.q - 1) * 3 + 1), '-01')))
+    ) AS dt_from,
+    if(qq.q = 0,
+        toDate(concat(toString(yy.y + 1), '-01-01')),
+        addMonths(toStartOfQuarter(toDate(concat(toString(yy.y), '-', toString((qq.q - 1) * 3 + 1), '-01'))), 3)
+    ) AS dt_to
+FROM (SELECT arrayJoin(range(2019,2028)) AS y) yy
+CROSS JOIN (SELECT arrayJoin(range(0,5)) AS q) qq;
 
 TRUNCATE TABLE tmp.dim_basic_filters;
 
