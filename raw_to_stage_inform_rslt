@@ -1,0 +1,36 @@
+CREATE TABLE IF NOT EXISTS stage.inform_rslt
+(
+    id UUID,
+    task_id UUID,
+    result_code String,
+    reaction_code Nullable(String),
+    communication_method_code String,
+    smo_code String,
+    created_at DateTime
+)
+ENGINE = MergeTree
+ORDER BY (task_id, id)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO stage.inform_rslt
+(
+    id,
+    task_id,
+    result_code,
+    reaction_code,
+    communication_method_code,
+    smo_code,
+    created_at
+)
+SELECT
+    id,
+    task_id,
+    result_code,
+    reaction_code,
+    communication_method_code,
+    smo_code,
+    created_at
+FROM raw.inform_result
+WHERE id IS NOT NULL
+  AND task_id IS NOT NULL
+  AND created_at IS NOT NULL;
