@@ -1,0 +1,507 @@
+
+Рэйтинги
+-- 4. rating_base
+drop table tmp.rating_base
+CREATE TABLE tmp.rating_base
+(
+    plan_id         UUID,
+    episod_id       String,
+    profile_cd      Int32,
+    plan_start_date Date,
+    plan_end_date   Nullable(Date),
+    disp_id         Int64,
+    mpioip          String,
+    group_cd        Int32,
+    ds_cd           String,
+    disp_in_dt      Date,
+    disp_out_dt     Nullable(Date),
+    disp_mo_cd      String,
+    birth_dt        Date,
+    death_dt        Nullable(Date),
+    pol_cd          Int64,
+    ok_region_cd    String,
+    smo_region_cd   String,
+    smo_cd          String,
+    attach_mo_cd    String
+)
+ENGINE = MergeTree
+ORDER BY (mpioip, disp_id, plan_id)
+SETTINGS index_granularity = 8192;
+-- 5. rating_task_base
+CREATE TABLE tmp.rating_task_base
+(
+    mpioip          String,
+    disp_id         Int64,
+    plan_id         UUID,
+    profile_cd      Int32,
+    group_cd        Int32,
+    region_smo_cd   String,
+    smo_cd          String,
+    mo_cd           String,
+    task_id         UUID,
+    task_status_cd  Int32,
+    task_start      Date,
+    task_end        Date,
+    closed_dt       Nullable(Date),
+    usl_id          String
+)
+ENGINE = MergeTree
+ORDER BY (mpioip, task_id, usl_id)
+SETTINGS index_granularity = 8192;
+--
+CREATE TABLE IF NOT EXISTS precalc.rating_detail
+(
+    f_y Int32,
+    f_q Int32,
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_smo String,
+    f_mo String,
+    region_smo_cd String,
+    smo_cd String,
+    smo_name String,
+    mo_cd String,
+    mo_name String,
+    insured_cnt UInt64,
+    sl_dn_cnt UInt64,
+    all_tasks UInt64,
+    task_done_cnt UInt64,
+    charge_item_cnt UInt64,
+    insert_dttm DateTime64(3, 'Europe/Moscow'),
+    update_dttm DateTime64(3, 'Europe/Moscow')
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    smo_cd,
+    mo_cd
+);
+CREATE TABLE IF NOT EXISTS precalc.rating_detail_part
+(
+    f_y Int32,
+    f_q Int32,
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_smo String,
+    f_mo String,
+    region_smo_cd String,
+    smo_cd String,
+    mo_cd String,
+    insured_cnt UInt64,
+    sl_dn_cnt UInt64,
+    all_tasks UInt64,
+    task_done_cnt UInt64,
+    charge_item_cnt UInt64
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    smo_cd,
+    mo_cd
+);
+TRUNCATE TABLE tmp.rating_base;
+INSERT INTO tmp.rating_base
+SELECT
+    dp.plan_id,
+    dp.episod_id,
+    dp.profile_cd,
+    dp.start_date AS plan_start_date,
+    dp.end_date AS plan_end_date,
+    di.disp_id,
+    di.mpioip,
+    di.group_cd,
+    di.ds_cd,
+    di.in_dt AS disp_in_dt,
+    di.out_dt AS disp_out_dt,
+    di.mo_cd AS disp_mo_cd,
+    p.birth_dt,
+    p.death_dt,
+    p.pol_cd,
+    p.ok_region_cd,
+    p.smo_region_cd,
+    p.smo_cd,
+    p.attach_mo_cd
+FROM stage.dispensary_plan dp
+INNER JOIN stage.disp_info di
+    ON di.episod_id = dp.episod_id
+INNER JOIN stage.dispans_person p
+    ON p.mpioip = di.mpioip
+INSERT INTO tmp.rating_task_base
+SELECT
+    rb.mpioip,
+    rb.disp_id,
+    rb.plan_id,
+    rb.profile_cd,
+    rb.group_cd,
+    rb.smo_region_cd AS region_smo_cd,
+    rb.smo_cd,
+    rb.disp_mo_cd AS mo_cd,
+    t.task_id,
+    t.task_status_cd,
+    t.task_start,
+    t.task_end,
+    t.closed_dt,
+    ifNull(tu.usl_id, '') AS usl_id
+FROM tmp.rating_base rb
+INNER JOIN stage.event_task t
+    ON t.plan_id = rb.plan_id
+LEFT JOIN stage.task_usl tu
+    ON tu.task_id = t.task_id;
+TRUNCATE TABLE precalc.rating_detail_part;
+TRUNCATE TABLE precalc.rating_detail;
+INSERT INTO precalc.rating_detail_part
+SELECT
+    cp.f_y,
+    cp.f_q,
+    if(bitTest(mask, 0), '0', rb.smo_region_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', toString(rb.profile_cd)) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', toString(rb.group_cd)) AS f_dn_group_cd,
+    if(bitTest(mask, 3), '0', rb.smo_cd) AS f_smo,
+    if(bitTest(mask, 4), '0', rb.disp_mo_cd) AS f_mo,
+    rb.smo_region_cd AS region_smo_cd,
+    rb.smo_cd,
+    rb.disp_mo_cd AS mo_cd,
+    uniqExact(rb.mpioip) AS insured_cnt,
+    uniqExact(rb.disp_id) AS sl_dn_cnt,
+    toUInt64(0) AS all_tasks,
+    toUInt64(0) AS task_done_cnt,
+    toUInt64(0) AS charge_item_cnt
+FROM tmp.rating_base rb
+CROSS JOIN tmp.calc_periods cp
+ARRAY JOIN range(32) AS mask
+WHERE rb.disp_in_dt < cp.dt_to
+  AND  (rb.disp_out_dt IS NULL  OR rb.disp_out_dt >= cp.dt_from )
+GROUP BY
+    cp.f_y,
+    cp.f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    rb.smo_cd,
+    mo_cd;
+INSERT INTO precalc.rating_detail_part
+SELECT
+    cp.f_y,
+    cp.f_q,
+    if(bitTest(mask, 0), '0', tb.region_smo_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', toString(tb.profile_cd)) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', toString(tb.group_cd)) AS f_dn_group_cd,
+    if(bitTest(mask, 3), '0', tb.smo_cd) AS f_smo,
+    if(bitTest(mask, 4), '0', tb.mo_cd) AS f_mo,
+    tb.region_smo_cd,
+    tb.smo_cd,
+    tb.mo_cd,
+    toUInt64(0) AS insured_cnt,
+    toUInt64(0) AS sl_dn_cnt,
+    uniqExactIf(tb.task_id, tb.task_status_cd NOT IN (4, 5)) AS all_tasks,
+    uniqExactIf(tb.task_id, tb.task_status_cd IN (1, 2)) AS task_done_cnt,
+    uniqExactIf(tb.usl_id, tb.usl_id != '') AS charge_item_cnt
+FROM tmp.rating_task_base tb
+CROSS JOIN tmp.calc_periods cp
+ARRAY JOIN range(32) AS mask
+WHERE tb.task_start < cp.dt_to
+  AND tb.task_end >= cp.dt_from
+GROUP BY
+    cp.f_y,
+    cp.f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    tb.region_smo_cd,
+    tb.smo_cd,
+    tb.mo_cd;
+INSERT INTO precalc.rating_detail
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    smo_cd,
+    mo_cd,
+    insured_cnt,
+    sl_dn_cnt,
+    all_tasks,
+    task_done_cnt,
+    charge_item_cnt,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    smo_cd,
+    mo_cd,
+    sum(insured_cnt),
+    sum(sl_dn_cnt),
+    sum(all_tasks),
+    sum(task_done_cnt),
+    sum(charge_item_cnt),
+    now64(3, 'Europe/Moscow'),
+    now64(3, 'Europe/Moscow')
+FROM precalc.rating_detail_part
+GROUP BY
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    smo_cd,
+    mo_cd;
+TRUNCATE TABLE cube.mo_rating;
+INSERT INTO cube.mo_rating
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    mo_cd,
+    insured_cnt,
+    sl_dn_cnt,
+    all_tasks,
+    task_done_cnt,
+    task_done_prc,
+    charge_item_cnt,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    mo_cd,
+    insured_cnt_sum AS insured_cnt,
+    sl_dn_cnt_sum AS sl_dn_cnt,
+    all_tasks_sum AS all_tasks,
+    task_done_cnt_sum AS task_done_cnt,
+    toDecimal64(
+        if(
+            all_tasks_sum > 0,
+            round(task_done_cnt_sum * 100.0 / all_tasks_sum, 2),
+            0
+        ),
+        2
+    ) AS task_done_prc,
+    charge_item_cnt_sum AS charge_item_cnt,
+    now64(3, 'Europe/Moscow') AS insert_dttm,
+    now64(3, 'Europe/Moscow') AS update_dttm
+FROM
+(
+    SELECT
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        mo_cd,
+        sum(insured_cnt) AS insured_cnt_sum,
+        sum(sl_dn_cnt) AS sl_dn_cnt_sum,
+        sum(all_tasks) AS all_tasks_sum,
+        sum(task_done_cnt) AS task_done_cnt_sum,
+        sum(charge_item_cnt) AS charge_item_cnt_sum
+    FROM precalc.rating_detail
+    GROUP BY
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        mo_cd
+);
+TRUNCATE TABLE cube.region_rating;
+INSERT INTO cube.region_rating
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    smo_cd,
+    mo_cnt,
+    insured_cnt,
+    sl_dn_cnt,
+    all_tasks,
+    task_done_cnt,
+    task_done_prc,
+    charge_item_cnt,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    smo_cd,
+    mo_cnt,
+    insured_cnt_sum,
+    sl_dn_cnt_sum,
+    all_tasks_sum,
+    task_done_cnt_sum,
+    toDecimal64(
+        if(
+            all_tasks_sum > 0,
+            round(task_done_cnt_sum * 100.0 / all_tasks_sum, 2),
+            0
+        ),
+        2
+    ) AS task_done_prc,
+    charge_item_cnt_sum,
+    now64(3, 'Europe/Moscow'),
+    now64(3, 'Europe/Moscow')
+FROM
+(
+    SELECT
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        smo_cd,
+        uniqExact(mo_cd) AS mo_cnt,
+        sum(insured_cnt) AS insured_cnt_sum,
+        sum(sl_dn_cnt) AS sl_dn_cnt_sum,
+        sum(all_tasks) AS all_tasks_sum,
+        sum(task_done_cnt) AS task_done_cnt_sum,
+        sum(charge_item_cnt) AS charge_item_cnt_sum
+    FROM precalc.rating_detail
+    GROUP BY
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        smo_cd
+);
+TRUNCATE TABLE cube.smo_rating;
+INSERT INTO cube.smo_rating
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    mo_cnt,
+    smo_cnt,
+    insured_cnt,
+    sl_dn_cnt,
+    all_tasks,
+    task_done_cnt,
+    task_done_prc,
+    charge_item_cnt,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo,
+    region_smo_cd,
+    mo_cnt,
+    smo_cnt,
+    insured_cnt_sum,
+    sl_dn_cnt_sum,
+    all_tasks_sum,
+    task_done_cnt_sum,
+    toDecimal64(
+        if(
+            all_tasks_sum > 0,
+  round(task_done_cnt_sum * 100.0 / all_tasks_sum, 2),
+            0
+        ),
+        2
+    ) AS task_done_prc,
+    charge_item_cnt_sum,
+    now64(3, 'Europe/Moscow') AS insert_dttm,
+    now64(3, 'Europe/Moscow') AS update_dttm
+FROM
+(
+    SELECT
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        region_smo_cd,
+        uniqExact(mo_cd) AS mo_cnt,
+        uniqExact(smo_cd) AS smo_cnt,
+        sum(insured_cnt) AS insured_cnt_sum,
+        sum(sl_dn_cnt) AS sl_dn_cnt_sum,
+        sum(all_tasks) AS all_tasks_sum,
+        sum(task_done_cnt) AS task_done_cnt_sum,
+        sum(charge_item_cnt) AS charge_item_cnt_sum
+    FROM precalc.rating_detail
+    GROUP BY
+        f_y,
+        f_q,
+        f_region_smo_cd,
+        f_profile_cd,
+        f_dn_group_cd,
+        f_smo,
+        f_mo,
+        region_smo_cd
+);
