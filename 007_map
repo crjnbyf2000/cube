@@ -1,1 +1,155 @@
-
+CREATE TABLE cube.map
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    all_tasks UInt64,
+    completed_tasks UInt64,
+    main_execution_percent Decimal(18, 2)
+)
+ENGINE = MergeTree
+ORDER BY (f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_y, f_q, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS tmp.map_period_tasks
+(
+    task_id UUID,
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_mo String,
+    task_status_cd Int32
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_mo,
+    task_id
+)
+SETTINGS index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS tmp.map_cube_agg
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    all_tasks UInt64,
+    completed_tasks UInt64,
+    main_execution_percent Decimal(18, 2)
+)
+ENGINE = MergeTree
+ORDER BY
+(
+    f_y,
+    f_q,
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_smo,
+    f_mo
+)
+SETTINGS index_granularity = 8192;
+---
+--Один период:
+--1. Очистить периодную таблицу
+--TRUNCATE TABLE tmp.map_period_tasks;
+--2. Наполнить её для:
+--v_year = 2024
+--v_quarter = 0
+--3. Очистить агрегат
+--TRUNCATE TABLE tmp.map_cube_agg;
+--4. Построить агрегацию
+--INSERT INTO tmp.map_cube_agg ...
+--5. Вставить в cube.map
+--INSERT INTO cube.map ...
+///
+truncate table tmp.map_period_tasks 
+truncate table tmp.map_cube_agg
+INSERT INTO tmp.map_period_tasks 
+WITH
+    2025 AS v_year,
+    0 AS v_quarter
+SELECT DISTINCT
+    b.task_id,
+    if(ifNull(b.smo_region_cd, '') = '', '0', b.smo_region_cd) AS f_region_smo_cd,
+    toString(ifNull(b.profile_cd, 0)) AS f_profile_cd,
+    toString(ifNull(b.group_cd, 0)) AS f_dn_group_cd,
+    v_year AS f_y,
+    v_quarter AS f_q,
+    if(ifNull(b.attach_mo_cd, '') = '', '0', b.attach_mo_cd) AS f_mo,
+    b.task_status_cd
+FROM tmp.for_basic_metrics AS b
+CROSS JOIN
+(
+    SELECT
+        dt_from,
+        dt_to
+    FROM tmp.calc_periods
+    WHERE f_y = v_year
+      AND f_q = v_quarter
+) AS p
+WHERE b.task_id IS NOT NULL
+  AND b.task_status_cd IS NOT NULL
+  AND b.task_start < p.dt_to
+  AND b.task_end >= p.dt_from
+  AND if(ifNull(b.smo_region_cd, '') = '', '0', b.smo_region_cd) != '0';
+INSERT INTO tmp.map_cube_agg
+SELECT
+    f_region_smo_cd,
+    if(bitTest(mask, 0), '0', f_profile_cd) AS f_profile_cd,
+    if(bitTest(mask, 1), '0', f_dn_group_cd) AS f_dn_group_cd,
+    f_y,
+    f_q,
+    '0' AS f_smo,
+    if(bitTest(mask, 2), '0', f_mo) AS f_mo,
+    uniqExactIf(task_id, task_status_cd NOT IN (4, 5)) AS all_tasks,
+    uniqExactIf(task_id, task_status_cd IN (1, 2)) AS completed_tasks,
+    toDecimal64(if(all_tasks > 0, round(completed_tasks * 100.0 / all_tasks, 2), 0), 2) AS main_execution_percent
+FROM tmp.map_period_tasks
+ARRAY JOIN range(8) AS mask
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo;
+INSERT INTO cube.map
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    all_tasks,
+    completed_tasks,
+    main_execution_percent
+)
+SELECT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    all_tasks,
+    completed_tasks,
+    main_execution_percent
+FROM tmp.map_cube_agg;
