@@ -1,4 +1,4 @@
-Ринат Ахметов (23.06.2026 18:51):
+
 ---done execution_by_month
 CREATE TABLE IF NOT EXISTS tmp.done_task_month_source
 (
