@@ -1,0 +1,355 @@
+CREATE TABLE IF NOT EXISTS cube.profiles
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    bsk_tasks_count_v UInt64,
+    zno_tasks_count_v UInt64,
+    bsk_done_task_count_v UInt64,
+    bsk_done_task_percent_v Decimal(18, 2),
+    bsk_assumpt_task_count_v UInt64,
+    bsk_assumpt_task_percent_v Decimal(18, 2),
+    bsk_plan_task_count_v UInt64,
+    bsk_plan_task_percent_v Decimal(18, 2),
+    bsk_failed_task_count_v UInt64,
+    bsk_failed_task_percent_v Decimal(18, 2),
+    zno_done_task_count_v UInt64,
+    zno_done_task_percent_v Decimal(18, 2),
+    zno_assumpt_task_count_v UInt64,
+    zno_assumpt_task_percent_v Decimal(18, 2),
+    zno_plan_task_count_v UInt64,
+    zno_plan_task_percent_v Decimal(18, 2),
+    zno_failed_task_count_v UInt64,
+    zno_failed_task_percent_v Decimal(18, 2),
+    endo_tasks_count_v UInt64,
+    endo_done_task_count_v UInt64,
+    endo_done_task_percent_v Decimal(18, 2),
+    endo_assumpt_task_count_v UInt64,
+    endo_assumpt_task_percent_v Decimal(18, 2),
+    endo_plan_task_count_v UInt64,
+    endo_plan_task_percent_v Decimal(18, 2),
+    endo_failed_task_count_v UInt64,
+    endo_failed_task_percent_v Decimal(18, 2),
+    insert_dttm DateTime64(3, 'Europe/Moscow'),
+    update_dttm DateTime64(3, 'Europe/Moscow')
+)
+ENGINE = MergeTree
+ORDER BY (f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_y, f_q, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+
+-- ============================================================
+-- 2. Очистка временных таблиц
+-- ============================================================
+
+DROP TABLE IF EXISTS tmp.profiles_task_agg;
+DROP TABLE IF EXISTS tmp.profiles_detail;
+DROP TABLE IF EXISTS tmp.profiles_cube_agg;
+
+-- ============================================================
+-- 3. Создание и наполнение tmp.profiles_task_agg
+--    (агрегация по задачам: измерения + event_type + статус)
+-- ============================================================
+
+CREATE TABLE tmp.profiles_task_agg
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    event_type_cd Int32,
+    task_status_cd Int32,
+    task_cnt UInt64
+)
+ENGINE = MergeTree
+ORDER BY (f_y, f_q, f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_smo, f_mo, event_type_cd, task_status_cd)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO tmp.profiles_task_agg
+SELECT
+    if(bitTest(mask, 0), '0', real_region_smo_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', real_profile_cd) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', real_dn_group_cd) AS f_dn_group_cd,
+    f_y,
+    f_q,
+    if(bitTest(mask, 3), '0', real_smo) AS f_smo,
+    if(bitTest(mask, 4), '0', real_mo) AS f_mo,
+    event_type_cd,
+    task_status_cd,
+    uniqExact(task_id) AS task_cnt
+FROM
+(
+    SELECT DISTINCT
+        cp.f_y,
+        cp.f_q,
+        if(ifNull(t.smo_cd, '') = '', '0', substring(t.smo_cd, 1, 2)) AS real_region_smo_cd,
+        toString(ifNull(t.profile_cd, 0)) AS real_profile_cd,
+        toString(ifNull(t.group_cd, 0)) AS real_dn_group_cd,
+        if(ifNull(t.smo_cd, '') = '', '0', t.smo_cd) AS real_smo,
+        if(ifNull(t.attach_mo_cd, '') = '', '0', t.attach_mo_cd) AS real_mo,
+        t.task_id,
+        t.task_status_cd,
+        t.event_type_cd
+    FROM tmp.for_basic_metrics AS t
+    CROSS JOIN tmp.calc_periods AS cp
+    WHERE t.task_id IS NOT NULL
+      AND t.task_status_cd IN (1, 2, 3, 4)
+      AND ifNull(t.closed_dt, toDate(now('Europe/Moscow'))) >= cp.dt_from
+      AND ifNull(t.closed_dt, toDate(now('Europe/Moscow'))) < cp.dt_to
+      AND t.event_type_cd IN (1, 2, 3)  -- только нужные типы
+) AS src
+ARRAY JOIN range(32) AS mask
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    event_type_cd,
+    task_status_cd;
+
+-- ============================================================
+-- 4. Создание и наполнение tmp.profiles_detail
+--    (разворот по типам событий, сумма статусов)
+-- ============================================================
+
+CREATE TABLE tmp.profiles_detail
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    bsk_tasks_count_v UInt64,
+    zno_tasks_count_v UInt64,
+    endo_tasks_count_v UInt64,
+    bsk_done_task_count_v UInt64,
+    bsk_assumpt_task_count_v UInt64,
+    bsk_plan_task_count_v UInt64,
+    bsk_failed_task_count_v UInt64,
+    zno_done_task_count_v UInt64,
+    zno_assumpt_task_count_v UInt64,
+    zno_plan_task_count_v UInt64,
+    zno_failed_task_count_v UInt64,
+    endo_done_task_count_v UInt64,
+    endo_assumpt_task_count_v UInt64,
+    endo_plan_task_count_v UInt64,
+    endo_failed_task_count_v UInt64
+)
+ENGINE = MergeTree
+ORDER BY (f_y, f_q, f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO tmp.profiles_detail
+SELECT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    sumIf(task_cnt, event_type_cd = 1) AS bsk_tasks_count_v,
+    sumIf(task_cnt, event_type_cd = 2) AS zno_tasks_count_v,
+    sumIf(task_cnt, event_type_cd = 3) AS endo_tasks_count_v,
+    sumIf(task_cnt, event_type_cd = 1 AND task_status_cd = 1) AS bsk_done_task_count_v,
+    sumIf(task_cnt, event_type_cd = 1 AND task_status_cd = 2) AS bsk_assumpt_task_count_v,
+    sumIf(task_cnt, event_type_cd = 1 AND task_status_cd = 4) AS bsk_plan_task_count_v,
+    sumIf(task_cnt, event_type_cd = 1 AND task_status_cd = 3) AS bsk_failed_task_count_v,
+    sumIf(task_cnt, event_type_cd = 2 AND task_status_cd = 1) AS zno_done_task_count_v,
+    sumIf(task_cnt, event_type_cd = 2 AND task_status_cd = 2) AS zno_assumpt_task_count_v,
+    sumIf(task_cnt, event_type_cd = 2 AND task_status_cd = 4) AS zno_plan_task_count_v,
+    sumIf(task_cnt, event_type_cd = 2 AND task_status_cd = 3) AS zno_failed_task_count_v,
+    sumIf(task_cnt, event_type_cd = 3 AND task_status_cd = 1) AS endo_done_task_count_v,
+    sumIf(task_cnt, event_type_cd = 3 AND task_status_cd = 2) AS endo_assumpt_task_count_v,
+    sumIf(task_cnt, event_type_cd = 3 AND task_status_cd = 4) AS endo_plan_task_count_v,
+    sumIf(task_cnt, event_type_cd = 3 AND task_status_cd = 3) AS endo_failed_task_count_v
+FROM tmp.profiles_task_agg
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo;
+
+-- ============================================================
+-- 5. Создание и наполнение tmp.profiles_cube_agg
+--    (свёртка по маскам, без разбивки по типам – уже свёрнуто)
+-- ============================================================
+
+CREATE TABLE tmp.profiles_cube_agg
+(
+    f_region_smo_cd String,
+    f_profile_cd String,
+    f_dn_group_cd String,
+    f_y Int32,
+    f_q Int32,
+    f_smo String,
+    f_mo String,
+    bsk_tasks_count_v UInt64,
+    zno_tasks_count_v UInt64,
+    endo_tasks_count_v UInt64,
+    bsk_done_task_count_v UInt64,
+    bsk_assumpt_task_count_v UInt64,
+    bsk_plan_task_count_v UInt64,
+    bsk_failed_task_count_v UInt64,
+    zno_done_task_count_v UInt64,
+    zno_assumpt_task_count_v UInt64,
+    zno_plan_task_count_v UInt64,
+    zno_failed_task_count_v UInt64,
+    endo_done_task_count_v UInt64,
+    endo_assumpt_task_count_v UInt64,
+    endo_plan_task_count_v UInt64,
+    endo_failed_task_count_v UInt64
+)
+ENGINE = MergeTree
+ORDER BY (f_y, f_q, f_region_smo_cd, f_profile_cd, f_dn_group_cd, f_smo, f_mo)
+SETTINGS index_granularity = 8192;
+
+INSERT INTO tmp.profiles_cube_agg
+SELECT
+    if(bitTest(mask, 0), '0', f_region_smo_cd) AS f_region_smo_cd,
+    if(bitTest(mask, 1), '0', f_profile_cd) AS f_profile_cd,
+    if(bitTest(mask, 2), '0', f_dn_group_cd) AS f_dn_group_cd,
+    if(bitTest(mask, 3), 0, f_y) AS f_y,
+    if(bitTest(mask, 4), 0, f_q) AS f_q,
+    if(bitTest(mask, 5), '0', f_smo) AS f_smo,
+    if(bitTest(mask, 6), '0', f_mo) AS f_mo,
+    sum(bsk_tasks_count_v) AS bsk_tasks_count_v,
+    sum(zno_tasks_count_v) AS zno_tasks_count_v,
+    sum(endo_tasks_count_v) AS endo_tasks_count_v,
+    sum(bsk_done_task_count_v) AS bsk_done_task_count_v,
+    sum(bsk_assumpt_task_count_v) AS bsk_assumpt_task_count_v,
+    sum(bsk_plan_task_count_v) AS bsk_plan_task_count_v,
+    sum(bsk_failed_task_count_v) AS bsk_failed_task_count_v,
+    sum(zno_done_task_count_v) AS zno_done_task_count_v,
+    sum(zno_assumpt_task_count_v) AS zno_assumpt_task_count_v,
+    sum(zno_plan_task_count_v) AS zno_plan_task_count_v,
+    sum(zno_failed_task_count_v) AS zno_failed_task_count_v,
+    sum(endo_done_task_count_v) AS endo_done_task_count_v,
+    sum(endo_assumpt_task_count_v) AS endo_assumpt_task_count_v,
+    sum(endo_plan_task_count_v) AS endo_plan_task_count_v,
+    sum(endo_failed_task_count_v) AS endo_failed_task_count_v
+FROM tmp.profiles_detail
+ARRAY JOIN range(128) AS mask
+GROUP BY
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo
+HAVING NOT (f_q != 0 AND f_y = 0)
+   AND NOT (
+        bsk_tasks_count_v = 0
+        AND zno_tasks_count_v = 0
+        AND endo_tasks_count_v = 0
+        AND bsk_done_task_count_v = 0
+        AND bsk_assumpt_task_count_v = 0
+        AND bsk_plan_task_count_v = 0
+        AND bsk_failed_task_count_v = 0
+        AND zno_done_task_count_v = 0
+        AND zno_assumpt_task_count_v = 0
+        AND zno_plan_task_count_v = 0
+        AND zno_failed_task_count_v = 0
+        AND endo_done_task_count_v = 0
+        AND endo_assumpt_task_count_v = 0
+        AND endo_plan_task_count_v = 0
+        AND endo_failed_task_count_v = 0
+   );
+
+-- ============================================================
+-- 6. Очистка и загрузка финального куба
+-- ============================================================
+TRUNCATE TABLE cube.profiles;
+
+INSERT INTO cube.profiles
+(
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    bsk_tasks_count_v,
+    zno_tasks_count_v,
+    bsk_done_task_count_v,
+    bsk_done_task_percent_v,
+    bsk_assumpt_task_count_v,
+    bsk_assumpt_task_percent_v,
+    bsk_plan_task_count_v,
+    bsk_plan_task_percent_v,
+    bsk_failed_task_count_v,
+    bsk_failed_task_percent_v,
+    zno_done_task_count_v,
+    zno_done_task_percent_v,
+    zno_assumpt_task_count_v,
+    zno_assumpt_task_percent_v,
+    zno_plan_task_count_v,
+    zno_plan_task_percent_v,
+    zno_failed_task_count_v,
+    zno_failed_task_percent_v,
+    endo_tasks_count_v,
+    endo_done_task_count_v,
+    endo_done_task_percent_v,
+    endo_assumpt_task_count_v,
+    endo_assumpt_task_percent_v,
+    endo_plan_task_count_v,
+    endo_plan_task_percent_v,
+    endo_failed_task_count_v,
+    endo_failed_task_percent_v,
+    insert_dttm,
+    update_dttm
+)
+SELECT
+    f_region_smo_cd,
+    f_profile_cd,
+    f_dn_group_cd,
+    f_y,
+    f_q,
+    f_smo,
+    f_mo,
+    bsk_tasks_count_v,
+    zno_tasks_count_v,
+    bsk_done_task_count_v,
+    toDecimal64(if(bsk_tasks_count_v > 0, round(bsk_done_task_count_v * 100.0 / bsk_tasks_count_v, 2), 0), 2),
+    bsk_assumpt_task_count_v,
+    toDecimal64(if(bsk_tasks_count_v > 0, round(bsk_assumpt_task_count_v * 100.0 / bsk_tasks_count_v, 2), 0), 2),
+    bsk_plan_task_count_v,
+    toDecimal64(if(bsk_tasks_count_v > 0, round(bsk_plan_task_count_v * 100.0 / bsk_tasks_count_v, 2), 0), 2),
+    bsk_failed_task_count_v,
+    toDecimal64(if(bsk_tasks_count_v > 0, round(bsk_failed_task_count_v * 100.0 / bsk_tasks_count_v, 2), 0), 2),
+    zno_done_task_count_v,
+    toDecimal64(if(zno_tasks_count_v > 0, round(zno_done_task_count_v * 100.0 / zno_tasks_count_v, 2), 0), 2),
+    zno_assumpt_task_count_v,
+    toDecimal64(if(zno_tasks_count_v > 0, round(zno_assumpt_task_count_v * 100.0 / zno_tasks_count_v, 2), 0), 2),
+    zno_plan_task_count_v,
+    toDecimal64(if(zno_tasks_count_v > 0, round(zno_plan_task_count_v * 100.0 / zno_tasks_count_v, 2), 0), 2),
+    zno_failed_task_count_v,
+    toDecimal64(if(zno_tasks_count_v > 0, round(zno_failed_task_count_v * 100.0 / zno_tasks_count_v, 2), 0), 2),
+    endo_tasks_count_v,
+    endo_done_task_count_v,
+    toDecimal64(if(endo_tasks_count_v > 0, round(endo_done_task_count_v * 100.0 / endo_tasks_count_v, 2), 0), 2),
+    endo_assumpt_task_count_v,
+    toDecimal64(if(endo_tasks_count_v > 0, round(endo_assumpt_task_count_v * 100.0 / endo_tasks_count_v, 2), 0), 2),
+    endo_plan_task_count_v,
+    toDecimal64(if(endo_tasks_count_v > 0, round(endo_plan_task_count_v * 100.0 / endo_tasks_count_v, 2), 0), 2),
+    endo_failed_task_count_v,
+    toDecimal64(if(endo_tasks_count_v > 0, round(endo_failed_task_count_v * 100.0 / endo_tasks_count_v, 2), 0), 2),
+    now64(3, 'Europe/Moscow') AS insert_dttm,
+    now64(3, 'Europe/Moscow') AS update_dttm
+FROM tmp.profiles_cube_agg;
